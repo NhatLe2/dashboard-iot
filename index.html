@@ -5,23 +5,99 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dashboard Giám Sát Nông Nghiệp</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #e9ecef; margin: 0; padding: 20px; text-align: center; }
-        .container { max-width: 1000px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-        h1 { color: #2c3e50; margin-bottom: 5px; }
-        p { color: #7f8c8d; margin-bottom: 30px; }
-        canvas { margin-top: 10px; }
+        .container { max-width: 1000px; margin: auto; }
+        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+        .value-box { background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 5px solid #3498db; }
+        .value-box h3 { margin: 0; font-size: 14px; color: #7f8c8d; }
+        .value-box p { margin: 5px 0 0; font-size: 24px; font-weight: bold; color: #2c3e50; }
+        button { padding: 10px 20px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; color: white; font-weight: bold; transition: 0.3s;}
+        .btn-on { background: #2ecc71; } .btn-off { background: #e74c3c; }
+        .btn-auto { background: #3498db; width: 100%; margin-top: 10px;}
+        button:active { transform: scale(0.95); }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Giám Sát Nông Nghiệp Đám Mây (Cloud Dashboard)</h1>
-        <p>Kiến trúc Edge Gateway - Dữ liệu thực tế từ Supabase</p>
+        <h1 style="color: #2c3e50;">Trạm Điều Khiển Nông Nghiệp (Hybrid Control)</h1>
         
-        <canvas id="myChart"></canvas>
+        <div class="card">
+            <h2 style="margin-top:0; color:#34495e;">Trạng thái Thời gian thực (Live)</h2>
+            <div class="grid-3">
+                <div class="value-box" style="border-color: #e74c3c;">
+                    <h3>Nhiệt độ</h3><p><span id="rt-temp">--</span> °C</p>
+                </div>
+                <div class="value-box" style="border-color: #3498db;">
+                    <h3>Độ ẩm KK</h3><p><span id="rt-hum">--</span> %</p>
+                </div>
+                <div class="value-box" style="border-color: #2ecc71;">
+                    <h3>Độ ẩm Đất</h3><p><span id="rt-soil">--</span> %</p>
+                </div>
+            </div>
+            
+            <div style="margin-top: 20px;" class="grid-3">
+                <div class="value-box" style="border-color: #f1c40f;">
+                    <h3>Bơm Nước</h3>
+                    <button class="btn-on" onclick="sendControl('pump', 1)">BẬT</button>
+                    <button class="btn-off" onclick="sendControl('pump', 0)">TẮT</button>
+                </div>
+                <div class="value-box" style="border-color: #9b59b6;">
+                    <h3>Quạt Tản Nhiệt</h3>
+                    <button class="btn-on" onclick="sendControl('fan', 1)">BẬT</button>
+                    <button class="btn-off" onclick="sendControl('fan', 0)">TẮT</button>
+                </div>
+                <div class="value-box" style="border-color: #34495e;">
+                    <h3>Chế Độ</h3>
+                    <button class="btn-auto" onclick="sendControl('auto', 1)">BẬT AUTO</button>
+                    <button class="btn-auto" style="background:#7f8c8d;" onclick="sendControl('auto', 0)">CHUYỂN MANUAL</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 style="margin-top:0; color:#34495e;">Biểu Đồ Lịch Sử (Từ Supabase)</h2>
+            <canvas id="myChart"></canvas>
+        </div>
     </div>
 
     <script>
+        // ==========================================
+        // 1. KẾT NỐI MQTT (ĐIỀU KHIỂN & XEM LIVE)
+        // ==========================================
+        const clientId = 'web_' + Math.random().toString(16).substr(2, 8);
+        const mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt', { clientId: clientId });
+
+        const TOPIC_SENSOR = 'DoAn_EE3183_NhatLe/sensors';
+        const TOPIC_CONTROL = 'DoAn_EE3183_NhatLe/control';
+
+        mqttClient.on('connect', function () {
+            console.log('Đã kết nối MQTT Broker thành công!');
+            mqttClient.subscribe(TOPIC_SENSOR);
+        });
+
+        // Nhận dữ liệu Real-time từ ESP32
+        mqttClient.on('message', function (topic, message) {
+            if (topic === TOPIC_SENSOR) {
+                const data = JSON.parse(message.toString());
+                document.getElementById('rt-temp').innerText = data.t;
+                document.getElementById('rt-hum').innerText = data.h;
+                document.getElementById('rt-soil').innerText = data.s;
+            }
+        });
+
+        // Hàm phát lệnh điều khiển
+        function sendControl(device, state) {
+            const payload = JSON.stringify({ device: device, state: state });
+            mqttClient.publish(TOPIC_CONTROL, payload);
+            alert("Đã gửi lệnh: " + device + " -> " + (state ? "BẬT" : "TẮT"));
+        }
+
+        // ==========================================
+        // 2. BIỂU ĐỒ SUPABASE (NHƯ CŨ)
+        // ==========================================
         const SUPABASE_URL = 'https://jlumfhzlpvbujfcwshtg.supabase.co'; 
         const SUPABASE_KEY = 'sb_publishable_5a6Ugo0f9VlMBA6w8AFgvA_7BsYZ47W'; 
         const TABLE_NAME = 'nong_nghiep_data'; 
@@ -29,12 +105,8 @@
         async function fetchDataAndDraw() {
             try {
                 const response = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE_NAME}?select=*&order=created_at.desc&limit=20`, {
-                    headers: {
-                        'apikey': SUPABASE_KEY,
-                        'Authorization': `Bearer ${SUPABASE_KEY}`
-                    }
+                    headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
                 });
-                
                 const data = await response.json();
                 data.reverse();
 
@@ -50,22 +122,12 @@
                         labels: labels,
                         datasets: [
                             { label: 'Nhiệt độ (°C)', data: temps, borderColor: '#e74c3c', backgroundColor: 'rgba(231, 76, 60, 0.1)', tension: 0.4, fill: true },
-                            { label: 'Độ ẩm KK (%)', data: hums, borderColor: '#3498db', backgroundColor: 'rgba(52, 152, 219, 0.1)', tension: 0.4, fill: true },
                             { label: 'Độ ẩm Đất (%)', data: soils, borderColor: '#2ecc71', backgroundColor: 'rgba(46, 204, 113, 0.1)', tension: 0.4, fill: true }
                         ]
-                    },
-                    options: { 
-                        responsive: true, 
-                        plugins: { legend: { position: 'top' } },
-                        scales: { y: { beginAtZero: true } } 
                     }
                 });
-            } catch (error) {
-                console.error("Lỗi khi tải dữ liệu:", error);
-                alert("Không thể tải dữ liệu. Hãy kiểm tra lại kết nối mạng!");
-            }
+            } catch (error) { console.error("Lỗi vẽ biểu đồ"); }
         }
-
         fetchDataAndDraw();
     </script>
 </body>
