@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard Giám Sát Nông Nghiệp</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #e9ecef; margin: 0; padding: 20px; text-align: center; }
+        .container { max-width: 1000px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; margin-bottom: 5px; }
+        p { color: #7f8c8d; margin-bottom: 30px; }
+        canvas { margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Giám Sát Nông Nghiệp Đám Mây (Cloud Dashboard)</h1>
+        <p>Kiến trúc Edge Gateway - Dữ liệu thực tế từ Supabase</p>
+        
+        <canvas id="myChart"></canvas>
+    </div>
+
+    <script>
+        const SUPABASE_URL = 'https://jlumfhzlpvbujfcwshtg.supabase.co'; 
+        const SUPABASE_KEY = 'sb_publishable_5a6Ugo0f9VlMBA6w8AFgvA_7BsYZ47W'; 
+        const TABLE_NAME = 'nong_nghiep_data'; 
+
+        async function fetchDataAndDraw() {
+            try {
+                const response = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE_NAME}?select=*&order=created_at.desc&limit=20`, {
+                    headers: {
+                        'apikey': SUPABASE_KEY,
+                        'Authorization': `Bearer ${SUPABASE_KEY}`
+                    }
+                });
+                
+                const data = await response.json();
+                data.reverse();
+
+                const labels = data.map(item => new Date(item.created_at).toLocaleTimeString('vi-VN'));
+                const temps = data.map(item => item.temperature);
+                const hums = data.map(item => item.humidity);
+                const soils = data.map(item => item.soil_moisture);
+
+                const ctx = document.getElementById('myChart').getContext('2d');
+                new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [
+                            { label: 'Nhiệt độ (°C)', data: temps, borderColor: '#e74c3c', backgroundColor: 'rgba(231, 76, 60, 0.1)', tension: 0.4, fill: true },
+                            { label: 'Độ ẩm KK (%)', data: hums, borderColor: '#3498db', backgroundColor: 'rgba(52, 152, 219, 0.1)', tension: 0.4, fill: true },
+                            { label: 'Độ ẩm Đất (%)', data: soils, borderColor: '#2ecc71', backgroundColor: 'rgba(46, 204, 113, 0.1)', tension: 0.4, fill: true }
+                        ]
+                    },
+                    options: { 
+                        responsive: true, 
+                        plugins: { legend: { position: 'top' } },
+                        scales: { y: { beginAtZero: true } } 
+                    }
+                });
+            } catch (error) {
+                console.error("Lỗi khi tải dữ liệu:", error);
+                alert("Không thể tải dữ liệu. Hãy kiểm tra lại kết nối mạng!");
+            }
+        }
+
+        fetchDataAndDraw();
+    </script>
+</body>
+</html>
