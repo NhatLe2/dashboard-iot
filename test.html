@@ -1,485 +1,837 @@
-#include <Arduino.h>
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
-#include <Adafruit_AHTX0.h>
-#include <WiFi.h>
-#include <WebServer.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
-#include <PubSubClient.h>
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Dashboard giam sat nong nghiep IoT - EE3183">
+    <title>Dashboard IoT – Giam Sat Nong Nghiep</title>
 
-// ==========================================
-// CẤU HÌNH PHẦN CỨNG
-// ==========================================
-#define SOIL_MOISURE_PIN          34
-#define SOIL_ADC_DRY              4095
-#define SOIL_ADC_WET              1800
-#define RELAY_PIN                 32
-#define FAN_PIN                   33
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 
-#define SOIL_MOISURE_THRESHOLD_MIN  75
-#define SOIL_MOISURE_THRESHOLD_MAX  85
-#define TEMP_THRESHOLD_MAX          27
-#define TEMP_THRESHOLD_MIN          23
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-// ==========================================
-// CẤU HÌNH MẠNG & CLOUD
-// ==========================================
-const char* AP_SSID         = "FarmNode-Nhat";
-const char* AP_PASSWORD     = "12345678";
-const char* STA_SSID        = "11";
-const char* STA_PASSWORD    = "68686868";
+        body {
+            font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+            background: #eef1f5;
+            padding: 20px;
+            min-height: 100vh;
+            color: #2c3e50;
+        }
 
-const char* cloudServerUrl  = "https://gateway-iot-nongnghiep.onrender.com/api/sensors";
+        .container { max-width: 1040px; margin: auto; }
 
-// ==========================================
-// CẤU HÌNH MQTT
-// ==========================================
-const char* mqtt_server     = "broker.emqx.io";
-const int   mqtt_port       = 1883;
-const char* topic_sensor    = "DoAn_EE3183_NhatLe/sensors";
-const char* topic_control   = "DoAn_EE3183_NhatLe/control";
-const char* topic_status    = "DoAn_EE3183_NhatLe/status";   // FIX: topic mới
+        /* ================================================
+           HEADER
+        ================================================ */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .header-text h1 { font-size: 21px; font-weight: 700; }
+        .header-text p  { font-size: 12px; color: #95a5a6; margin-top: 3px; }
 
-// LWT payload — broker tự publish khi ESP32 mất kết nối đột ngột
-// Dashboard nhận online=false → gọi devOffline() ngay lập tức
-// tránh hiện trạng thái cũ sai thực tế
-const char* lwt_payload     = "{\"pump\":0,\"fan\":0,\"auto\":0,\"online\":false}";
+        .mqtt-badge {
+            padding: 7px 14px;
+            border-radius: 20px;
+            font-weight: 700;
+            font-size: 13px;
+            background: #e74c3c;
+            color: #fff;
+            transition: background 0.35s;
+            text-align: right;
+            line-height: 1.4;
+            min-width: 160px;
+        }
+        .mqtt-badge .sub    { font-size: 10px; font-weight: 400; display: block; opacity: 0.85; }
+        .mqtt-badge.ok      { background: #27ae60; }
+        .mqtt-badge.pending { background: #f39c12; }
 
+        /* ================================================
+           CARD
+        ================================================ */
+        .card {
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 2px 14px rgba(0,0,0,0.07);
+            padding: 20px;
+            margin-bottom: 18px;
+        }
+        .card-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+        .card-head h2 { font-size: 15px; font-weight: 600; }
+        .card-head p  { font-size: 11px; color: #aab3bd; margin-top: 3px; }
 
-// ==========================================
-// KHỞI TẠO ĐỐI TƯỢNG
-// ==========================================
-Adafruit_AHTX0    aht;
-LiquidCrystal_I2C lcd(0x27, 16, 2);
-WebServer         server(80);
-WiFiClient        espClient;
-PubSubClient      mqtt(espClient);
+        /* ================================================
+           GRID
+        ================================================ */
+        .grid3 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+        }
 
-// ==========================================
-// BIẾN TRẠNG THÁI
-// ==========================================
-int   soil_moisure  = 0;
-float humidity      = 0.0;
-float temperature   = 0.0;
+        /* ================================================
+           SENSOR BOXES
+        ================================================ */
+        .s-box {
+            background: #f8f9fa;
+            border-left: 4px solid #3498db;
+            border-radius: 8px;
+            padding: 14px;
+            transition: opacity 0.4s;
+        }
+        .s-box.stale { opacity: 0.38; }
+        .s-label { font-size: 11px; color: #95a5a6; text-transform: uppercase; letter-spacing: 0.5px; }
+        .s-val   { font-size: 30px; font-weight: 700; color: #2c3e50; line-height: 1.25; margin-top: 4px; }
+        .s-unit  { font-size: 15px; font-weight: 400; color: #7f8c8d; }
+        .sensor-ts { font-size: 11px; color: #bdc3c7; text-align: right; margin: -10px 0 12px; }
 
-bool  isAutoMode    = true;
-bool  relayState    = false;
-bool  fanState      = false;
+        /* ================================================
+           CONTROL BOXES
+        ================================================ */
+        .c-box {
+            background: #f8f9fa;
+            border-left: 4px solid #ccc;
+            border-radius: 8px;
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 9px;
+            transition: opacity 0.3s;
+        }
 
-// ==========================================
-// BIẾN THỜI GIAN (non-blocking)
-// ==========================================
-unsigned long lastSensorRead  = 0;
-unsigned long lastCloudPost   = 0;
-unsigned long lastLcdUpdate   = 0;
-unsigned long lastMqttAttempt = 0;
+        /* Hiệu ứng mờ khi bị khoá bởi Auto mode */
+        .c-box.auto-locked {
+            opacity: 0.55;
+        }
 
-const unsigned long SENSOR_INTERVAL  = 2000;
-const unsigned long CLOUD_INTERVAL   = 10000;
-const unsigned long LCD_INTERVAL     = 500;
-const unsigned long MQTT_RETRY_DELAY = 5000;
+        /* Banner cảnh báo Auto lock */
+        .auto-lock-notice {
+            display: none;
+            font-size: 11px;
+            color: #1a5276;
+            background: #d6eaf8;
+            border-radius: 5px;
+            padding: 5px 8px;
+            font-weight: 600;
+        }
+        .auto-locked .auto-lock-notice { display: block; }
 
-// ==========================================
-// HÀM: PUBLISH TRẠNG THÁI LÊN MQTT (retain=true)
+        .c-label { font-size: 11px; color: #95a5a6; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+
+        /* State badge */
+        .st-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 700;
+            width: fit-content;
+            transition: background 0.25s, color 0.25s;
+        }
+        .st-unknown  { background: #ecf0f1; color: #95a5a6; }
+        .st-offline  { background: #ecf0f1; color: #7f8c8d; }
+        .st-on       { background: #d5f5e3; color: #1a7a40; }
+        .st-off      { background: #fadbd8; color: #c0392b; }
+        .st-auto     { background: #d6eaf8; color: #1a5276; }
+        .st-manual   { background: #f0f3f4; color: #5d6d7e; }
+        .st-pending  { background: #fef5e7; color: #b7770d; animation: blink .85s ease-in-out infinite; }
+        .st-timeout  { background: #fde8d8; color: #c0392b; }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+        /* Buttons */
+        .btn-row { display: flex; gap: 8px; }
+        .cb {
+            flex: 1; padding: 9px 6px; font-size: 13px; font-weight: 700;
+            border: 2px solid transparent; border-radius: 6px;
+            cursor: pointer; color: #fff;
+            transition: filter .15s, transform .1s, box-shadow .2s;
+        }
+        .cb:hover:not(:disabled) { filter: brightness(1.12); }
+        .cb:active:not(:disabled) { transform: scale(0.96); }
+        .cb:disabled {
+            opacity: .38;
+            cursor: not-allowed;
+            filter: grayscale(40%);
+        }
+        .cb.lit { border-color: rgba(255,255,255,.85); box-shadow: 0 0 0 3px rgba(0,0,0,.18); }
+        .c-on     { background: #27ae60; }
+        .c-off    { background: #e74c3c; }
+        .c-auto   { background: #2980b9; }
+        .c-manual { background: #7f8c8d; }
+
+        /* ================================================
+           CHART
+        ================================================ */
+        .chart-wrap { position: relative; height: 300px; }
+
+        .c-overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: rgba(255,255,255,.93);
+            border-radius: 8px;
+            gap: 12px;
+            text-align: center;
+        }
+        .c-overlay.hidden { display: none; }
+        .spinner {
+            width: 34px; height: 34px;
+            border: 3px solid #ecf0f1;
+            border-top-color: #3498db;
+            border-radius: 50%;
+            animation: spin .8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .overlay-text      { font-size: 13px; color: #7f8c8d; line-height: 1.5; }
+        .overlay-text .err { font-size: 11px; color: #e74c3c; margin-top: 4px; }
+        .btn-retry {
+            padding: 6px 18px; font-size: 12px; font-weight: 700;
+            border: none; border-radius: 6px;
+            background: #3498db; color: #fff; cursor: pointer;
+        }
+        .btn-retry:hover { filter: brightness(1.1); }
+
+        .btn-rf {
+            padding: 6px 12px; font-size: 12px; font-weight: 600;
+            border: 1px solid #d5d8dc; border-radius: 6px;
+            background: #fff; color: #555; cursor: pointer;
+            flex-shrink: 0; transition: background .15s;
+        }
+        .btn-rf:hover    { background: #f4f6f7; }
+        .btn-rf:disabled { opacity: .45; cursor: not-allowed; }
+
+        .chart-meta { font-size: 11px; color: #bdc3c7; text-align: right; margin-top: 8px; }
+
+        /* ================================================
+           TOAST
+        ================================================ */
+        #toast {
+            visibility: hidden;
+            min-width: 250px;
+            background: #2c3e50; color: #fff;
+            text-align: center;
+            border-radius: 8px;
+            padding: 13px 20px;
+            position: fixed;
+            z-index: 999;
+            left: 50%; bottom: 30px;
+            transform: translateX(-50%);
+            font-size: 14px;
+            opacity: 0;
+            transition: opacity .3s, bottom .3s;
+            pointer-events: none;
+            white-space: normal;
+            max-width: calc(100vw - 40px);
+        }
+        #toast.show { visibility: visible; opacity: 1; bottom: 50px; }
+
+        code { background: #f0f3f4; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <!-- ======== HEADER ======== -->
+    <div class="header">
+        <div class="header-text">
+            <h1>🌾 Dashboard IoT – Giám Sát Nông Nghiệp</h1>
+            <p>nhatle2.github.io/dashboard-iot · EE3183 · Edge Gateway</p>
+        </div>
+        <div id="mqtt-status" class="mqtt-badge">
+            <span id="mqtt-main">🔴 Chưa kết nối</span>
+            <span class="sub" id="mqtt-sub">Khởi động...</span>
+        </div>
+    </div>
+
+    <!-- ======== SENSOR CARD ======== -->
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <h2>📡 Cảm Biến – Thời Gian Thực</h2>
+            </div>
+        </div>
+        <p id="sensor-ts" class="sensor-ts">Chưa nhận được dữ liệu</p>
+        <div class="grid3">
+            <div class="s-box" id="sbox-temp" style="border-color:#e74c3c">
+                <div class="s-label">🌡️ Nhiệt Độ (AHT10)</div>
+                <div class="s-val"><span id="rt-temp">--</span><span class="s-unit"> °C</span></div>
+            </div>
+            <div class="s-box" id="sbox-hum" style="border-color:#3498db">
+                <div class="s-label">💧 Độ Ẩm Không Khí</div>
+                <div class="s-val"><span id="rt-hum">--</span><span class="s-unit"> %</span></div>
+            </div>
+            <div class="s-box" id="sbox-soil" style="border-color:#2ecc71">
+                <div class="s-label">🌱 Độ Ẩm Đất</div>
+                <div class="s-val"><span id="rt-soil">--</span><span class="s-unit"> %</span></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ======== CONTROL CARD ======== -->
+    <!--
+        FIX: Bơm & Quạt bị khoá khi Auto mode đang bật.
+        Firmware chỉ xử lý lệnh pump/fan khi !isAutoMode
+        → Dashboard đồng bộ logic này để tránh timeout giả.
+
+        Firmware cần publish retain khi thay đổi trạng thái:
+          Topic  : DoAn_EE3183_NhatLe/status
+          Payload: {"pump":1,"fan":0,"auto":1}
+          Retain : true  ← để web nhận ngay khi mở trang
+    -->
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <h2>🎛️ Bảng Điều Khiển</h2>
+                <p>
+                    Trạng thái xác nhận từ mạch qua topic <code>…/status</code> · Timeout 6s nếu không phản hồi
+                    · <strong>Bơm & Quạt chỉ điều khiển được ở chế độ MANUAL</strong>
+                </p>
+            </div>
+        </div>
+        <div class="grid3">
+
+            <!-- Bơm nước -->
+            <div class="c-box" id="cbox-pump" style="border-color:#f39c12">
+                <div class="c-label">💧 Bơm Nước</div>
+                <span id="ind-pump" class="st-badge st-unknown">⚪ Chưa xác định</span>
+                <!-- Banner hiện khi bị khoá Auto -->
+                <div class="auto-lock-notice">🔒 Đang AUTO — chuyển MANUAL để điều khiển</div>
+                <div class="btn-row">
+                    <button id="bon-pump"  class="cb c-on">BẬT</button>
+                    <button id="boff-pump" class="cb c-off">TẮT</button>
+                </div>
+            </div>
+
+            <!-- Quạt tản nhiệt -->
+            <div class="c-box" id="cbox-fan" style="border-color:#9b59b6">
+                <div class="c-label">🌀 Quạt Tản Nhiệt</div>
+                <span id="ind-fan" class="st-badge st-unknown">⚪ Chưa xác định</span>
+                <div class="auto-lock-notice">🔒 Đang AUTO — chuyển MANUAL để điều khiển</div>
+                <div class="btn-row">
+                    <button id="bon-fan"  class="cb c-on">BẬT</button>
+                    <button id="boff-fan" class="cb c-off">TẮT</button>
+                </div>
+            </div>
+
+            <!-- Chế độ vận hành -->
+            <div class="c-box" id="cbox-auto" style="border-color:#2c3e50">
+                <div class="c-label">⚙️ Chế Độ Vận Hành</div>
+                <span id="ind-auto" class="st-badge st-unknown">⚪ Chưa xác định</span>
+                <div class="btn-row">
+                    <button id="bon-auto"  class="cb c-auto">AUTO</button>
+                    <button id="boff-auto" class="cb c-manual">MANUAL</button>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- ======== CHART CARD ======== -->
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <h2>📊 Biểu Đồ Lịch Sử</h2>
+                <p>Dữ liệu từ Supabase · Live point từ MQTT · Tự đồng bộ mỗi 5 phút</p>
+            </div>
+            <button id="btn-rf" class="btn-rf">↻ Làm mới</button>
+        </div>
+        <div class="chart-wrap">
+            <canvas id="myChart"></canvas>
+            <div id="chart-overlay" class="c-overlay">
+                <div class="spinner"></div>
+                <div class="overlay-text">Đang tải dữ liệu lịch sử...</div>
+            </div>
+        </div>
+        <p id="chart-meta" class="chart-meta"></p>
+    </div>
+
+</div>
+<div id="toast"></div>
+
+<script>
+// ================================================================
+//  DASHBOARD IOT – EE3183
 //
-// FIX: Thêm hàm publishStatus() tập trung, gọi ở mọi nơi
-//      thay đổi trạng thái để dashboard luôn nhận được
-//      trạng thái mới nhất dù mở trang bất kỳ lúc nào.
+//  FIX (so với phiên bản gốc):
+//  1. renderDev()   — disable bơm/quạt + hiện banner khi Auto mode bật
+//  2. sendControl() — guard từ chối gửi lệnh pump/fan khi Auto mode bật
+//  3. applyStatus() — re-render pump & fan ngay khi mode auto thay đổi
+//  4. applyStatus() — xử lý LWT: nếu online=false → gọi devOffline() ngay
+//                     tránh hiện trạng thái cũ khi ESP32 đã mất điện
 //
-// retain=true: broker lưu lại message cuối cùng,
-//              gửi ngay cho client mới subscribe.
-// online=true: dashboard biết ESP32 đang sống.
-//              Khi ESP32 mất điện, broker tự gửi LWT
-//              với online=false thay thế.
-// ==========================================
-void publishStatus() {
-    if (!mqtt.connected()) return;
+//  Bảo mật:
+//    - MQTT broker.emqx.io là public broker.
+//      Thêm username/password trong mqtt.connect() khi cần bảo mật.
+//    - Supabase key publishable OK cho client-side,
+//      kiểm tra Row Level Security trong Supabase Dashboard > Auth > Policies.
+// ================================================================
 
-    StaticJsonDocument<128> doc;
-    doc["pump"]   = relayState ? 1 : 0;
-    doc["fan"]    = fanState   ? 1 : 0;
-    doc["auto"]   = isAutoMode ? 1 : 0;
-    doc["online"] = true;   // Đang sống — LWT sẽ ghi đè bằng false khi mất điện
+let mqttClient    = null;
+let chart         = null;
+let _toast        = null;
+let _lastRx       = 0;
+let _chartRefresh = null;
 
-    String payload;
-    serializeJson(doc, payload);
+const CONFIRM_MS    = 6000;
+const STALE_MS      = 90000;
+const CHART_SYNC_MS = 300000;
+const MAX_PTS       = 20;
 
-    // retain = true: broker lưu lại, dashboard nhận ngay khi mở trang
-    mqtt.publish(topic_status, payload.c_str(), true);
+const T = {
+    sensor:  'DoAn_EE3183_NhatLe/sensors',
+    control: 'DoAn_EE3183_NhatLe/control',
+    status:  'DoAn_EE3183_NhatLe/status',
+};
+
+const SB = {
+    url:   'https://jlumfhzlpvbujfcwshtg.supabase.co',
+    key:   'sb_publishable_5a6Ugo0f9VlMBA6w8AFgvA_7BsYZ47W',
+    table: 'nong_nghiep_data',
+    cTime: 'created_at',
+    cTemp: 'temperature',
+    cHum:  'humidity',
+    cSoil: 'soil_moisture',
+};
+
+const DEV = {
+    pump: { state: null, pending: false, timeout: false, timer: null },
+    fan:  { state: null, pending: false, timeout: false, timer: null },
+    auto: { state: null, pending: false, timeout: false, timer: null },
+};
+
+const BADGE = {
+    pump: { 1: ['st-on',   '🟢 ĐANG BẬT'],       0: ['st-off',    '🔴 ĐANG TẮT']        },
+    fan:  { 1: ['st-on',   '🟢 ĐANG BẬT'],       0: ['st-off',    '🔴 ĐANG TẮT']        },
+    auto: { 1: ['st-auto', '🔵 Chế độ AUTO'], 0: ['st-manual', '⚪ Chế độ MANUAL'] },
+};
+
+// ================================================================
+//  TOAST
+// ================================================================
+function toast(msg, ms) {
+    var el = document.getElementById('toast');
+    el.textContent = msg;
+    el.className = 'show';
+    clearTimeout(_toast);
+    _toast = setTimeout(function(){ el.className = ''; }, ms || 3000);
 }
 
-// ==========================================
-// HÀM: ĐỌC CẢM BIẾN ĐỘ ẨM ĐẤT (có lọc nhiễu)
-// ==========================================
-int get_soil_moisure() {
-    // Đọc trung bình 5 lần để lọc nhiễu ADC
-    // delay(2) giữ ADC settling time và tính độc lập thống kê mẫu
-    long sum = 0;
-    for (int i = 0; i < 5; i++) {
-        sum += analogRead(SOIL_MOISURE_PIN);
-        delay(2);
+// ================================================================
+//  DEVICE UI
+//  FIX 1: Thêm isAutoLocked — khoá nút pump/fan khi đang Auto mode
+// ================================================================
+function renderDev(id) {
+    var d    = DEV[id];
+    var ind  = document.getElementById('ind-'  + id);
+    var b0   = document.getElementById('bon-'  + id);
+    var b1   = document.getElementById('boff-' + id);
+    var cbox = document.getElementById('cbox-' + id);
+    if (!ind || !b0 || !b1) return;
+
+    // ── Badge trạng thái ──
+    if (d.pending) {
+        ind.className   = 'st-badge st-pending';
+        ind.textContent = '⏳ Đang chờ xác nhận…';
+    } else if (d.timeout) {
+        ind.className   = 'st-badge st-timeout';
+        ind.textContent = '⚠️ Mạch không phản hồi';
+    } else if (d.state === null) {
+        ind.className   = 'st-badge st-unknown';
+        ind.textContent = '⚪ Chưa xác định';
+    } else {
+        var c = BADGE[id][d.state];
+        ind.className   = 'st-badge ' + c[0];
+        ind.textContent = c[1];
     }
-    int raw = (int)(sum / 5);
-    int percent = map(raw, SOIL_ADC_DRY, SOIL_ADC_WET, 0, 100);
-    return constrain(percent, 0, 100);
-}
 
-// ==========================================
-// HÀM: ĐỌC VÀ PHÁT DỮ LIỆU CẢM BIẾN
-// ==========================================
-void process_sensor() {
-    if (millis() - lastSensorRead < SENSOR_INTERVAL) return;
-    lastSensorRead = millis();
+    // ── FIX 1: Khoá nút pump/fan khi đang Auto mode ──
+    //    Chỉ áp dụng cho pump và fan, không áp dụng cho auto
+    var isAutoLocked = (id === 'pump' || id === 'fan') && (DEV.auto.state === 1);
 
-    sensors_event_t current_hum, current_temp;
-    aht.getEvent(&current_hum, &current_temp);
+    // Cập nhật class c-box để hiện banner + hiệu ứng mờ
+    if (cbox) {
+        if (isAutoLocked) {
+            cbox.classList.add('auto-locked');
+        } else {
+            cbox.classList.remove('auto-locked');
+        }
+    }
 
-    humidity      = current_hum.relative_humidity;
-    temperature   = current_temp.temperature;
-    soil_moisure  = get_soil_moisure();
+    // Xác định trạng thái disable tổng hợp
+    var isDisabled = d.pending || isAutoLocked;
 
-    if (mqtt.connected()) {
-        StaticJsonDocument<128> mqttDoc;
-        mqttDoc["t"] = temperature;
-        mqttDoc["h"] = humidity;
-        mqttDoc["s"] = soil_moisure;
-        String mqttStr;
-        serializeJson(mqttDoc, mqttStr);
-        mqtt.publish(topic_sensor, mqttStr.c_str());
+    b0.classList.toggle('lit', !isDisabled && d.state === 1);
+    b1.classList.toggle('lit', !isDisabled && d.state === 0);
+    b0.disabled = isDisabled;
+    b1.disabled = isDisabled;
+
+    // Tooltip giải thích lý do disable
+    if (isAutoLocked) {
+        b0.title = 'Chuyển sang MANUAL để điều khiển thủ công';
+        b1.title = 'Chuyển sang MANUAL để điều khiển thủ công';
+    } else {
+        b0.title = '';
+        b1.title = '';
     }
 }
 
-// ==========================================
-// HÀM: ĐIỀU KHIỂN RELAY (BƠM)
-// ==========================================
-void process_relay() {
-    bool prev = relayState;
-
-    if (isAutoMode) {
-        if      (soil_moisure < SOIL_MOISURE_THRESHOLD_MIN) relayState = true;
-        else if (soil_moisure > SOIL_MOISURE_THRESHOLD_MAX) relayState = false;
-    }
-    digitalWrite(RELAY_PIN, relayState ? HIGH : LOW);
-
-    // FIX: Publish status khi auto tự thay đổi trạng thái relay
-    if (relayState != prev) publishStatus();
-}
-
-// ==========================================
-// HÀM: ĐIỀU KHIỂN QUẠT
-// ==========================================
-void process_fan() {
-    bool prev = fanState;
-
-    if (isAutoMode) {
-        if      (temperature > TEMP_THRESHOLD_MAX) fanState = true;
-        else if (temperature < TEMP_THRESHOLD_MIN) fanState = false;
-    }
-    digitalWrite(FAN_PIN, fanState ? HIGH : LOW);
-
-    // FIX: Publish status khi auto tự thay đổi trạng thái quạt
-    if (fanState != prev) publishStatus();
-}
-
-// ==========================================
-// HÀM: HIỂN THỊ LCD (non-blocking)
-// ==========================================
-void process_lcd() {
-    if (millis() - lastLcdUpdate < LCD_INTERVAL) return;
-    lastLcdUpdate = millis();
-
-    lcd.setCursor(0, 0);
-    lcd.print("T:"); lcd.print(temperature, 1); lcd.print((char)223); lcd.print("  ");
-
-    lcd.setCursor(8, 0);
-    lcd.print("H:"); lcd.print(humidity, 1); lcd.print("%  ");
-
-    lcd.setCursor(0, 1);
-    lcd.print("D:"); lcd.print(soil_moisure); lcd.print("%  ");
-
-    lcd.setCursor(7, 1);
-    lcd.print(isAutoMode ? "AU " : "MN ");
-
-    lcd.setCursor(10, 1);
-    lcd.print("B:"); lcd.print(relayState ? "1" : "0");
-
-    lcd.setCursor(13, 1);
-    lcd.print("Q:"); lcd.print(fanState ? "1" : "0");
-}
-
-// ==========================================
-// HÀM: LOCAL WEB SERVER
-// ==========================================
-void handleRoot() {
-    String html = "<!DOCTYPE html><html lang='vi'><head>"
-        "<meta charset='UTF-8'>"
-        "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
-        "<title>Do An 1 - Nong Nghiep</title>"
-        "<style>"
-        "body{font-family:sans-serif;text-align:center;padding:10px;background:#f4f4f9;}"
-        ".card{background:#fff;padding:15px;border-radius:10px;box-shadow:0 2px 5px rgba(0,0,0,0.1);margin-bottom:15px;}"
-        "button{padding:10px 15px;margin:5px;font-size:16px;border:none;border-radius:5px;cursor:pointer;}"
-        ".btn-auto{background:#28a745;color:#fff;} .btn-man{background:#dc3545;color:#fff;}"
-        ".btn-on{background:#007bff;color:#fff;} .btn-off{background:#6c757d;color:#fff;}"
-        "</style></head><body>"
-        "<h2>IOT NONG NGHIEP (LOCAL NODE)</h2>"
-        "<div class='card'>"
-        "<p>Nhiet do: <b id='temp'>--</b> &deg;C | Do am KK: <b id='hum'>--</b> %</p>"
-        "<p>Do am dat: <b id='soil'>--</b> %</p>"
-        "</div>"
-        "<div class='card'><h3>Che do: <span id='mode-st'>--</span></h3>"
-        "<button class='btn-auto' onclick=\"setMode(1)\">AUTO</button>"
-        "<button class='btn-man' onclick=\"setMode(0)\">MANUAL</button></div>"
-        "<div class='card'><h3>May bom: <span id='relay-st'>--</span></h3>"
-        "<button class='btn-on' onclick=\"setRelay(1)\">BAT</button>"
-        "<button class='btn-off' onclick=\"setRelay(0)\">TAT</button></div>"
-        "<div class='card'><h3>Quat tan nhiet: <span id='fan-st'>--</span></h3>"
-        "<button class='btn-on' onclick=\"setFan(1)\">BAT</button>"
-        "<button class='btn-off' onclick=\"setFan(0)\">TAT</button></div>"
-        "<script>"
-        "function update(){"
-        "  fetch('/data').then(r=>r.json()).then(d=>{"
-        "    document.getElementById('temp').innerText=d.t;"
-        "    document.getElementById('hum').innerText=d.h;"
-        "    document.getElementById('soil').innerText=d.s;"
-        "    document.getElementById('mode-st').innerText=d.a?'Tu dong':'Thu cong';"
-        "    document.getElementById('relay-st').innerText=d.r?'DANG BOM':'TAT';"
-        "    document.getElementById('fan-st').innerText=d.f?'DANG QUAY':'TAT';"
-        "  }).catch(()=>{});"
-        "}"
-        "function setMode(v){fetch('/api/mode?v='+v).then(update).catch(()=>{});}"
-        "function setRelay(v){fetch('/api/relay?v='+v).then(update).catch(()=>{});}"
-        "function setFan(v){fetch('/api/fan?v='+v).then(update).catch(()=>{});}"
-        "setInterval(update,2000); update();"
-        "</script></body></html>";
-    server.send(200, "text/html", html);
-}
-
-void handleData() {
-    StaticJsonDocument<128> doc;
-    doc["t"] = round(temperature * 10.0) / 10.0;
-    doc["h"] = round(humidity    * 10.0) / 10.0;
-    doc["s"] = soil_moisure;
-    doc["a"] = isAutoMode ? 1 : 0;
-    doc["r"] = relayState ? 1 : 0;
-    doc["f"] = fanState   ? 1 : 0;
-
-    String json;
-    serializeJson(doc, json);
-
-    server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.send(200, "application/json", json);
-}
-
-void handleMode() {
-    if (server.hasArg("v")) {
-        isAutoMode = (server.arg("v") == "1");
-        publishStatus();   // FIX: cập nhật dashboard khi đổi mode qua local web
-    }
-    server.send(200, "text/plain", "OK");
-}
-
-void handleRelayAPI() {
-    if (!isAutoMode && server.hasArg("v")) {
-        relayState = (server.arg("v") == "1");
-        digitalWrite(RELAY_PIN, relayState ? HIGH : LOW);
-        publishStatus();   // FIX: cập nhật dashboard khi điều khiển qua local web
-    }
-    server.send(200, "text/plain", "OK");
-}
-
-void handleFanAPI() {
-    if (!isAutoMode && server.hasArg("v")) {
-        fanState = (server.arg("v") == "1");
-        digitalWrite(FAN_PIN, fanState ? HIGH : LOW);
-        publishStatus();   // FIX: cập nhật dashboard khi điều khiển qua local web
-    }
-    server.send(200, "text/plain", "OK");
-}
-
-// ==========================================
-// HÀM: MQTT CALLBACK (nhận lệnh điều khiển)
-// ==========================================
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
-    StaticJsonDocument<128> doc;
-
-    DeserializationError error = deserializeJson(doc, payload, length);
-    if (error) {
-        Serial.print("Loi parse JSON MQTT: ");
-        Serial.println(error.c_str());
+// ================================================================
+//  NHẬN PHẢN HỒI TỪ MCU
+//  FIX 3: Re-render pump & fan ngay khi auto state thay đổi
+//  FIX 4: Xử lý LWT — nếu ESP32 mất điện, broker gửi online=false
+//         → devOffline() ngay, không hiện trạng thái cũ sai thực tế
+// ================================================================
+function applyStatus(p) {
+    // FIX 4: LWT handler
+    // Khi ESP32 mất kết nối đột ngột, broker tự publish LWT payload
+    // với online=false. Dashboard nhận → hiện offline ngay lập tức,
+    // tránh trường hợp retained message cũ hiện "pump=ON" dù bơm đã tắt.
+    if (p.online === false) {
+        devOffline();
+        sensorOffline('ESP32 mất kết nối (LWT)');
         return;
     }
 
-    const char* device = doc["device"];
-    int state = doc["state"];
+    var autoChanged = false;
 
-    if (!device) return;
+    ['pump', 'fan', 'auto'].forEach(function(id) {
+        if (p[id] === undefined) return;
+        var d = DEV[id];
+        clearTimeout(d.timer);
+        d.pending = false;
+        d.timeout = false;
+        d.state   = p[id];
+        renderDev(id);
+        if (id === 'auto') autoChanged = true;
+    });
 
-    if (strcmp(device, "auto") == 0) {
-        isAutoMode = (state == 1);
-        publishStatus();   // FIX: xác nhận về dashboard ngay sau khi thay đổi mode
-    } else if (!isAutoMode) {
-        if (strcmp(device, "pump") == 0) {
-            relayState = (state == 1);
-            digitalWrite(RELAY_PIN, relayState ? HIGH : LOW);
-            publishStatus();   // FIX: xác nhận về dashboard sau khi điều khiển bơm
+    // FIX 3: Khi mode auto vừa thay đổi → re-render pump & fan
+    //        để cập nhật trạng thái khoá/mở khoá ngay lập tức
+    if (autoChanged) {
+        renderDev('pump');
+        renderDev('fan');
+    }
+}
+
+// Reset về offline khi mất kết nối MQTT
+function devOffline() {
+    ['pump', 'fan', 'auto'].forEach(function(id) {
+        clearTimeout(DEV[id].timer);
+        DEV[id].state   = null;
+        DEV[id].pending = false;
+        DEV[id].timeout = false;
+
+        var ind  = document.getElementById('ind-'  + id);
+        var b0   = document.getElementById('bon-'  + id);
+        var b1   = document.getElementById('boff-' + id);
+        var cbox = document.getElementById('cbox-' + id);
+
+        if (ind)  { ind.className = 'st-badge st-offline'; ind.textContent = '🔌 Mất kết nối'; }
+        if (cbox) { cbox.classList.remove('auto-locked'); }
+        if (b0)   { b0.disabled = false; b0.title = ''; }
+        if (b1)   { b1.disabled = false; b1.title = ''; }
+    });
+}
+
+// ================================================================
+//  GỬI LỆNH ĐIỀU KHIỂN
+//  FIX 2: Guard từ chối gửi pump/fan khi đang Auto mode
+// ================================================================
+function sendControl(device, state) {
+    if (!mqttClient || !mqttClient.connected) {
+        toast('⚠️ Chưa kết nối MQTT — không thể gửi lệnh');
+        return;
+    }
+
+    // FIX 2: Kiểm tra Auto lock trước khi gửi
+    //        Tránh trường hợp button bị bypass (vd: keyboard, automation)
+    if ((device === 'pump' || device === 'fan') && DEV.auto.state === 1) {
+        toast('🔒 Đang ở chế độ AUTO — chuyển sang MANUAL trước', 3500);
+        return;
+    }
+
+    mqttClient.publish(T.control, JSON.stringify({ device: device, state: state }), { qos: 1 });
+
+    // Đặt trạng thái pending và chờ xác nhận từ MCU
+    clearTimeout(DEV[device].timer);
+    DEV[device].pending = true;
+    DEV[device].timeout = false;
+    renderDev(device);
+
+    DEV[device].timer = setTimeout(function() {
+        if (!DEV[device].pending) return;
+        DEV[device].pending = false;
+        DEV[device].timeout = true;
+        renderDev(device);
+        toast('⚠️ Mạch không phản hồi sau ' + (CONFIRM_MS / 1000) + 's', 4000);
+    }, CONFIRM_MS);
+
+    var N = { pump: 'Bơm', fan: 'Quạt', auto: 'Chế độ' };
+    var S = { pump: ['→ TẮT', '→ BẬT'], fan: ['→ TẮT', '→ BẬT'], auto: ['→ MANUAL', '→ AUTO'] };
+    toast('📡 Đã phát: ' + N[device] + ' ' + S[device][state]);
+}
+
+// ================================================================
+//  SENSOR DISPLAY
+// ================================================================
+function updateSensor(t, h, s) {
+    if (t !== null) document.getElementById('rt-temp').textContent = t.toFixed(1);
+    if (h !== null) document.getElementById('rt-hum').textContent  = h.toFixed(1);
+    if (s !== null) document.getElementById('rt-soil').textContent = s.toFixed(1);
+    ['sbox-temp', 'sbox-hum', 'sbox-soil'].forEach(function(id) {
+        var el = document.getElementById(id); if (el) el.classList.remove('stale');
+    });
+    document.getElementById('sensor-ts').textContent =
+        'Cập nhật: ' + new Date().toLocaleTimeString('vi-VN');
+    _lastRx = Date.now();
+}
+
+function sensorOffline(why) {
+    ['rt-temp', 'rt-hum', 'rt-soil'].forEach(function(id) {
+        var el = document.getElementById(id); if (el) el.textContent = '--';
+    });
+    ['sbox-temp', 'sbox-hum', 'sbox-soil'].forEach(function(id) {
+        var el = document.getElementById(id); if (el) el.classList.add('stale');
+    });
+    document.getElementById('sensor-ts').textContent = why || 'Mất tín hiệu';
+    _lastRx = 0;
+}
+
+// ================================================================
+//  CHART (Supabase history + live MQTT push)
+// ================================================================
+function setOverlay(state, extra) {
+    var el = document.getElementById('chart-overlay');
+    if (!el) return;
+    if (state === 'hide') { el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    if (state === 'load') {
+        el.innerHTML = '<div class="spinner"></div><div class="overlay-text">Đang tải dữ liệu...</div>';
+    } else if (state === 'empty') {
+        el.innerHTML = '<div class="overlay-text">Bảng Supabase trống — chưa có dữ liệu lịch sử</div>';
+    } else if (state === 'err') {
+        el.innerHTML = '<div class="overlay-text">❌ Không tải được dữ liệu' +
+                       (extra ? '<div class="err">' + extra + '</div>' : '') +
+                       '</div><button class="btn-retry" id="btn-retry">↻ Thử lại</button>';
+        var b = document.getElementById('btn-retry');
+        if (b) b.addEventListener('click', syncChart);
+    }
+}
+
+async function syncChart() {
+    var btnRf = document.getElementById('btn-rf');
+    if (btnRf) btnRf.disabled = true;
+    setOverlay('load');
+
+    try {
+        var url = SB.url + '/rest/v1/' + SB.table +
+                  '?select=' + SB.cTime + ',' + SB.cTemp + ',' + SB.cHum + ',' + SB.cSoil +
+                  '&order=' + SB.cTime + '.desc&limit=' + MAX_PTS;
+
+        var res = await fetch(url, {
+            headers: { 'apikey': SB.key, 'Authorization': 'Bearer ' + SB.key }
+        });
+
+        if (res.status === 401 || res.status === 403) {
+            setOverlay('err', 'Lỗi xác thực Supabase (HTTP ' + res.status + ') — kiểm tra key & RLS Policy');
+            return;
         }
-        if (strcmp(device, "fan") == 0) {
-            fanState = (state == 1);
-            digitalWrite(FAN_PIN, fanState ? HIGH : LOW);
-            publishStatus();   // FIX: xác nhận về dashboard sau khi điều khiển quạt
+        if (res.status === 404) {
+            setOverlay('err', 'Bảng "' + SB.table + '" không tồn tại (HTTP 404) — kiểm tra tên bảng');
+            return;
         }
+        if (!res.ok) {
+            setOverlay('err', 'Lỗi server Supabase (HTTP ' + res.status + ')');
+            return;
+        }
+
+        var rows = await res.json();
+        if (!rows || !rows.length) { setOverlay('empty'); return; }
+
+        rows.reverse();
+        var labels = rows.map(function(r){ return new Date(r[SB.cTime]).toLocaleTimeString('vi-VN'); });
+        var temps  = rows.map(function(r){ return r[SB.cTemp];  });
+        var hums   = rows.map(function(r){ return r[SB.cHum];   });
+        var soils  = rows.map(function(r){ return r[SB.cSoil];  });
+
+        if (chart) {
+            chart.data.labels           = labels;
+            chart.data.datasets[0].data = temps;
+            chart.data.datasets[1].data = hums;
+            chart.data.datasets[2].data = soils;
+            chart.update('none');
+        } else {
+            chart = new Chart(document.getElementById('myChart').getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        { label: 'Nhiệt độ (°C)',  data: temps, borderColor: '#e74c3c', backgroundColor: 'rgba(231,76,60,.06)',  tension: .4, fill: true, pointRadius: 3 },
+                        { label: 'Độ ẩm KK (%)',   data: hums,  borderColor: '#3498db', backgroundColor: 'rgba(52,152,219,.06)', tension: .4, fill: true, pointRadius: 3 },
+                        { label: 'Độ ẩm Đất (%)',  data: soils, borderColor: '#2ecc71', backgroundColor: 'rgba(46,204,113,.06)', tension: .4, fill: true, pointRadius: 3 },
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false, animation: false,
+                    scales: {
+                        x: { ticks: { maxTicksLimit: 8, font: { size: 11 } } },
+                        y: { ticks: { font: { size: 11 } } }
+                    },
+                    plugins: { legend: { labels: { font: { size: 12 } } } }
+                }
+            });
+        }
+
+        setOverlay('hide');
+        var meta = document.getElementById('chart-meta');
+        if (meta) meta.textContent = 'Đồng bộ lúc ' + new Date().toLocaleTimeString('vi-VN') + ' — ' + rows.length + ' bản ghi';
+
+    } catch(e) {
+        console.error('Supabase fetch error:', e);
+        setOverlay('err', 'Không kết nối được Supabase — kiểm tra mạng');
+    } finally {
+        if (btnRf) btnRf.disabled = false;
     }
 }
 
-// ==========================================
-// HÀM: DUY TRÌ KẾT NỐI MQTT (non-blocking)
-//
-// FIX: Thêm setWill() trước khi connect.
-//      LWT (Last Will Testament) là cơ chế MQTT:
-//      broker tự động publish lwt_payload (online=false, retain=true)
-//      khi ESP32 mất kết nối đột ngột (mất điện, reset, crash).
-//      Dashboard nhận → hiện offline ngay, không hiện trạng thái cũ sai.
-// ==========================================
-void maintainMQTT() {
-    if (mqtt.connected()) return;
-    if (millis() - lastMqttAttempt < MQTT_RETRY_DELAY) return;
-    lastMqttAttempt = millis();
-
-    String clientId = "ESP32_Edge_" + String(random(0xffff), HEX);
-
-    // FIX: Khai báo LWT TRƯỚC khi gọi connect()
-    //      Tham số: topic, payload, retain, qos
-    mqtt.setWill(topic_status, lwt_payload, true, 1);
-
-    Serial.print("Ket noi MQTT... ");
-    if (mqtt.connect(clientId.c_str())) {
-        mqtt.subscribe(topic_control);
-        Serial.println("OK");
-
-        // FIX: Publish trạng thái khởi tạo ngay khi vừa kết nối
-        //      Dashboard nhận → hiện đúng trạng thái ngay lập tức,
-        //      không cần chờ lần thay đổi tiếp theo
-        publishStatus();
-    } else {
-        Serial.print("That bai, ma loi: ");
-        Serial.println(mqtt.state());
+function livePoint(t, h, s) {
+    if (!chart || t === null || h === null || s === null) return;
+    chart.data.labels.push(new Date().toLocaleTimeString('vi-VN'));
+    chart.data.datasets[0].data.push(t);
+    chart.data.datasets[1].data.push(h);
+    chart.data.datasets[2].data.push(s);
+    if (chart.data.labels.length > MAX_PTS) {
+        chart.data.labels.shift();
+        chart.data.datasets.forEach(function(d){ d.data.shift(); });
     }
+    chart.update('none');
 }
 
-// ==========================================
-// HÀM: ĐẨY DỮ LIỆU LỊCH SỬ LÊN CLOUD
-// ==========================================
-void sendDataToCloud() {
-    if (WiFi.status() != WL_CONNECTED) return;
+// ================================================================
+//  INIT
+// ================================================================
+document.addEventListener('DOMContentLoaded', function() {
 
-    HTTPClient http;
-    http.begin(cloudServerUrl);
-    http.addHeader("Content-Type", "application/json");
-    http.setTimeout(5000);
-
-    StaticJsonDocument<200> doc;
-    doc["node_id"]      = "Node_01";
-    doc["temperature"]  = temperature;
-    doc["humidity"]     = humidity;
-    doc["soil_moisture"]= soil_moisure;
-    doc["pump_state"]   = relayState;
-    doc["fan_state"]    = fanState;
-
-    String requestBody;
-    serializeJson(doc, requestBody);
-
-    int httpCode = http.POST(requestBody);
-    if (httpCode > 0) {
-        Serial.print("Cloud POST OK, code: ");
-        Serial.println(httpCode);
-    } else {
-        Serial.print("Cloud POST loi: ");
-        Serial.println(http.errorToString(httpCode));
+    if (typeof mqtt === 'undefined') {
+        toast('❌ MQTT.js chưa tải được — kiểm tra kết nối mạng', 10000);
+        return;
     }
-    http.end();
-}
-
-// ==========================================
-// SETUP
-// ==========================================
-void setup() {
-    Serial.begin(115200);
-
-    lcd.init();
-    lcd.backlight();
-    lcd.print("Khoi dong...");
-
-    if (!aht.begin()) {
-        Serial.println("Khong tim thay AHT10!");
-        lcd.setCursor(0, 1);
-        lcd.print("Loi AHT10!");
-        while (1) delay(10);
+    if (typeof Chart === 'undefined') {
+        setOverlay('err', 'Chart.js chưa tải được — kiểm tra mạng');
     }
 
-    pinMode(RELAY_PIN, OUTPUT); digitalWrite(RELAY_PIN, LOW);
-    pinMode(FAN_PIN,   OUTPUT); digitalWrite(FAN_PIN,   LOW);
+    mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
+        clientId:        'iot_' + Math.random().toString(36).slice(2, 8),
+        clean:           true,
+        keepalive:       60,
+        reconnectPeriod: 4000,
+        connectTimeout:  10000,
+    });
 
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP(AP_SSID, AP_PASSWORD);
-    Serial.print("AP IP: ");
-    Serial.println(WiFi.softAPIP());
+    var badge     = document.getElementById('mqtt-status');
+    var badgeMain = document.getElementById('mqtt-main');
+    var badgeSub  = document.getElementById('mqtt-sub');
 
-    lcd.clear();
-    lcd.print("Ket noi WiFi...");
-    WiFi.begin(STA_SSID, STA_PASSWORD);
+    mqttClient.on('connect', function() {
+        badge.className       = 'mqtt-badge ok';
+        badgeMain.textContent = '🟢 Đã kết nối';
+        if (badgeSub) badgeSub.textContent = 'broker.emqx.io · ' + new Date().toLocaleTimeString('vi-VN');
+        mqttClient.subscribe([T.sensor, T.status], { qos: 1 });
+        toast('✅ Kết nối MQTT thành công');
+    });
 
-    unsigned long wifiStart = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 15000) {
-        delay(500);
-        Serial.print(".");
-    }
+    mqttClient.on('reconnect', function() {
+        badge.className       = 'mqtt-badge pending';
+        badgeMain.textContent = '🟡 Đang kết nối lại…';
+        if (badgeSub) badgeSub.textContent = '';
+        devOffline();
+    });
 
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\nWiFi OK! IP: " + WiFi.localIP().toString());
-        lcd.clear();
-        lcd.print("WiFi OK");
-        lcd.setCursor(0, 1);
-        lcd.print(WiFi.localIP().toString());
-    } else {
-        Serial.println("\nWiFi that bai, chay AP-only");
-        lcd.clear();
-        lcd.print("AP Mode only");
-    }
+    mqttClient.on('offline', function() {
+        badge.className       = 'mqtt-badge';
+        badgeMain.textContent = '🔴 Mất kết nối';
+        if (badgeSub) badgeSub.textContent = '';
+        devOffline();
+        sensorOffline('Mất kết nối MQTT');
+    });
 
-    server.on("/",          HTTP_GET, handleRoot);
-    server.on("/data",      HTTP_GET, handleData);
-    server.on("/api/mode",  HTTP_GET, handleMode);
-    server.on("/api/relay", HTTP_GET, handleRelayAPI);
-    server.on("/api/fan",   HTTP_GET, handleFanAPI);
-    server.begin();
-    Serial.println("Web server started");
+    mqttClient.on('error', function(e) {
+        console.error('MQTT error:', e);
+        toast('❌ Lỗi MQTT: ' + (e.message || 'unknown error'), 5000);
+    });
 
-    mqtt.setServer(mqtt_server, mqtt_port);
-    mqtt.setCallback(mqttCallback);
+    mqttClient.on('message', function(topic, raw) {
+        var data;
+        try { data = JSON.parse(raw.toString()); }
+        catch(e) { console.warn('JSON parse failed on', topic); return; }
 
-    delay(1000);
-    lcd.clear();
-}
+        if (topic === T.sensor) {
+            var t = typeof data.t === 'number' ? data.t : null;
+            var h = typeof data.h === 'number' ? data.h : null;
+            var s = typeof data.s === 'number' ? data.s : null;
+            updateSensor(t, h, s);
+            livePoint(t, h, s);
+            // Hỗ trợ firmware gửi device state kèm sensor payload
+            applyStatus(data);
+        }
 
-// ==========================================
-// LOOP
-// ==========================================
-void loop() {
-    if (WiFi.status() == WL_CONNECTED) {
-        maintainMQTT();
-        mqtt.loop();
-    }
+        if (topic === T.status) {
+            applyStatus(data);
+        }
+    });
 
-    process_sensor();
-    process_relay();
-    process_fan();
-    process_lcd();
-    server.handleClient();
+    // Gắn sự kiện nút
+    [
+        ['bon-pump',  'pump', 1],
+        ['boff-pump', 'pump', 0],
+        ['bon-fan',   'fan',  1],
+        ['boff-fan',  'fan',  0],
+        ['bon-auto',  'auto', 1],
+        ['boff-auto', 'auto', 0],
+    ].forEach(function(row) {
+        var el = document.getElementById(row[0]);
+        if (!el) return;
+        el.addEventListener('click', (function(dev, st) {
+            return function(){ sendControl(dev, st); };
+        })(row[1], row[2]));
+    });
 
-    if (millis() - lastCloudPost >= CLOUD_INTERVAL) {
-        lastCloudPost = millis();
-        sendDataToCloud();
-    }
-}
+    // Refresh chart button
+    var btnRf = document.getElementById('btn-rf');
+    if (btnRf) btnRf.addEventListener('click', syncChart);
+
+    // Tải chart lần đầu
+    if (typeof Chart !== 'undefined') syncChart();
+
+    // Auto sync Supabase mỗi 5 phút
+    _chartRefresh = setInterval(function() {
+        if (typeof Chart !== 'undefined') syncChart();
+    }, CHART_SYNC_MS);
+
+    // Watchdog: kiểm tra sensor stale mỗi 15s
+    setInterval(function() {
+        if (_lastRx > 0 && Date.now() - _lastRx > STALE_MS) {
+            sensorOffline('Không nhận được dữ liệu > 90s');
+        }
+    }, 15000);
+
+});
+</script>
+</body>
+</html>
