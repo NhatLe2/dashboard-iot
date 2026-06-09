@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Dashboard giam sat nong nghiep IoT - EE3183">
+    <title>Dashboard IoT – Giam Sat Nong Nghiep</title>
+
+    <!-- Chart.js & MQTT.js qua CDN (GitHub Pages can't install npm) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+
+    <style>
+        /* ================================================
+           RESET & BASE
+        ================================================ */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+            background: #eef1f5;
+            padding: 20px;
+            min-height: 100vh;
+            color: #2c3e50;
+        }
+
+        .container { max-width: 1040px; margin: auto; }
+
+        /* ================================================
+           HEADER
+        ================================================ */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .header-text h1 { font-size: 21px; font-weight: 700; }
+        .header-text p  { font-size: 12px; color: #95a5a6; margin-top: 3px; }
+
+        /* MQTT status badge */
+        .mqtt-badge {
+            padding: 7px 14px;
+            border-radius: 20px;
+            font-weight: 700;
+            font-size: 13px;
+            background: #e74c3c;
+            color: #fff;
+            transition: background 0.35s;
+            text-align: right;
+            line-height: 1.4;
+            min-width: 160px;
+        }
+        .mqtt-badge .sub    { font-size: 10px; font-weight: 400; display: block; opacity: 0.85; }
+        .mqtt-badge.ok      { background: #27ae60; }
+        .mqtt-badge.pending { background: #f39c12; }
+
+        /* ================================================
+           CARD
+        ================================================ */
+        .card {
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 2px 14px rgba(0,0,0,0.07);
+            padding: 20px;
+            margin-bottom: 18px;
+        }
+        .card-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+        .card-head h2 { font-size: 15px; font-weight: 600; }
+        .card-head p  { font-size: 11px; color: #aab3bd; margin-top: 3px; }
+
+        /* ================================================
+           GRID
+        ================================================ */
+        .grid3 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+        }
+
+        /* ================================================
+           SENSOR BOXES
+        ================================================ */
+        .s-box {
+            background: #f8f9fa;
+            border-left: 4px solid #3498db;
+            border-radius: 8px;
+            padding: 14px;
+            transition: opacity 0.4s;
+        }
+        .s-box.stale { opacity: 0.38; }
+        .s-label { font-size: 11px; color: #95a5a6; text-transform: uppercase; letter-spacing: 0.5px; }
+        .s-val   { font-size: 30px; font-weight: 700; color: #2c3e50; line-height: 1.25; margin-top: 4px; }
+        .s-unit  { font-size: 15px; font-weight: 400; color: #7f8c8d; }
+        .sensor-ts { font-size: 11px; color: #bdc3c7; text-align: right; margin: -10px 0 12px; }
+
+        /* ================================================
+           CONTROL BOXES
+        ================================================ */
+        .c-box {
+            background: #f8f9fa;
+            border-left: 4px solid #ccc;
+            border-radius: 8px;
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 9px;
+        }
+        .c-label { font-size: 11px; color: #95a5a6; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+
+        /* State badge */
+        .st-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 700;
+            width: fit-content;
+            transition: background 0.25s, color 0.25s;
+        }
+        .st-unknown  { background: #ecf0f1; color: #95a5a6; }
+        .st-offline  { background: #ecf0f1; color: #7f8c8d; }
+        .st-on       { background: #d5f5e3; color: #1a7a40; }
+        .st-off      { background: #fadbd8; color: #c0392b; }
+        .st-auto     { background: #d6eaf8; color: #1a5276; }
+        .st-manual   { background: #f0f3f4; color: #5d6d7e; }
+        .st-pending  { background: #fef5e7; color: #b7770d; animation: blink .85s ease-in-out infinite; }
+        .st-timeout  { background: #fde8d8; color: #c0392b; }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+        /* Buttons */
+        .btn-row { display: flex; gap: 8px; }
+        .cb {
+            flex: 1; padding: 9px 6px; font-size: 13px; font-weight: 700;
+            border: 2px solid transparent; border-radius: 6px;
+            cursor: pointer; color: #fff;
+            transition: filter .15s, transform .1s, box-shadow .2s;
+        }
+        .cb:hover:not(:disabled) { filter: brightness(1.12); }
+        .cb:active:not(:disabled) { transform: scale(0.96); }
+        .cb:disabled { opacity: .38; cursor: not-allowed; }
+        .cb.lit { border-color: rgba(255,255,255,.85); box-shadow: 0 0 0 3px rgba(0,0,0,.18); }
+        .c-on     { background: #27ae60; }
+        .c-off    { background: #e74c3c; }
+        .c-auto   { background: #2980b9; }
+        .c-manual { background: #7f8c8d; }
+
+        /* ================================================
+           CHART
+        ================================================ */
+        .chart-wrap { position: relative; height: 300px; }
+
+        /* Overlay for loading / error / empty */
+        .c-overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: rgba(255,255,255,.93);
+            border-radius: 8px;
+            gap: 12px;
+            text-align: center;
+        }
+        .c-overlay.hidden { display: none; }
+        .spinner {
+            width: 34px; height: 34px;
+            border: 3px solid #ecf0f1;
+            border-top-color: #3498db;
+            border-radius: 50%;
+            animation: spin .8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .overlay-text      { font-size: 13px; color: #7f8c8d; line-height: 1.5; }
+        .overlay-text .err { font-size: 11px; color: #e74c3c; margin-top: 4px; }
+        .btn-retry {
+            padding: 6px 18px; font-size: 12px; font-weight: 700;
+            border: none; border-radius: 6px;
+            background: #3498db; color: #fff; cursor: pointer;
+        }
+        .btn-retry:hover { filter: brightness(1.1); }
+
+        /* Refresh button */
+        .btn-rf {
+            padding: 6px 12px; font-size: 12px; font-weight: 600;
+            border: 1px solid #d5d8dc; border-radius: 6px;
+            background: #fff; color: #555; cursor: pointer;
+            flex-shrink: 0; transition: background .15s;
+        }
+        .btn-rf:hover     { background: #f4f6f7; }
+        .btn-rf:disabled  { opacity: .45; cursor: not-allowed; }
+
+        .chart-meta { font-size: 11px; color: #bdc3c7; text-align: right; margin-top: 8px; }
+
+        /* ================================================
+           TOAST
+        ================================================ */
+        #toast {
+            visibility: hidden;
+            min-width: 250px;
+            background: #2c3e50; color: #fff;
+            text-align: center;
+            border-radius: 8px;
+            padding: 13px 20px;
+            position: fixed;
+            z-index: 999;
+            left: 50%; bottom: 30px;
+            transform: translateX(-50%);
+            font-size: 14px;
+            opacity: 0;
+            transition: opacity .3s, bottom .3s;
+            pointer-events: none;
+            white-space: normal;
+            max-width: calc(100vw - 40px);
+        }
+        #toast.show { visibility: visible; opacity: 1; bottom: 50px; }
+
+        /* ================================================
+           MISC
+        ================================================ */
+        code { background: #f0f3f4; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <!-- ======== HEADER ======== -->
+    <div class="header">
+        <div class="header-text">
+            <h1>🌾 Dashboard IoT – Giám Sát Nông Nghiệp</h1>
+            <p>nhatle2.github.io/dashboard-iot · EE3183 · Edge Gateway</p>
+        </div>
+        <div id="mqtt-status" class="mqtt-badge">
+            <span id="mqtt-main">🔴 Chưa kết nối</span>
+            <span class="sub" id="mqtt-sub">Khởi động...</span>
+        </div>
+    </div>
+
+    <!-- ======== SENSOR CARD ======== -->
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <h2>📡 Cảm Biến – Thời Gian Thực</h2>
+            </div>
+        </div>
+        <p id="sensor-ts" class="sensor-ts">Chưa nhận được dữ liệu</p>
+        <div class="grid3">
+            <div class="s-box" id="sbox-temp" style="border-color:#e74c3c">
+                <div class="s-label">🌡️ Nhiệt Độ (AHT10)</div>
+                <div class="s-val"><span id="rt-temp">--</span><span class="s-unit"> °C</span></div>
+            </div>
+            <div class="s-box" id="sbox-hum" style="border-color:#3498db">
+                <div class="s-label">💧 Độ Ẩm Không Khí</div>
+                <div class="s-val"><span id="rt-hum">--</span><span class="s-unit"> %</span></div>
+            </div>
+            <div class="s-box" id="sbox-soil" style="border-color:#2ecc71">
+                <div class="s-label">🌱 Độ Ẩm Đất</div>
+                <div class="s-val"><span id="rt-soil">--</span><span class="s-unit"> %</span></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ======== CONTROL CARD ======== -->
+    <!--
+        FIRMWARE NOTE:
+        Sau khi MCU thực thi lệnh từ topic .../control, cần publish:
+          Topic  : DoAn_EE3183_NhatLe/status
+          Payload: {"pump":1,"fan":0,"auto":1}
+          Retain : true   <-- QUAN TRỌNG: web nhận ngay khi mở trang
+    -->
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <h2>🎛️ Bảng Điều Khiển</h2>
+                <p>Trạng thái xác nhận từ mạch qua topic <code>…/status</code> · Timeout 6s nếu không phản hồi</p>
+            </div>
+        </div>
+        <div class="grid3">
+
+            <div class="c-box" style="border-color:#f39c12">
+                <div class="c-label">💧 Bơm Nước</div>
+                <span id="ind-pump" class="st-badge st-unknown">⚪ Chưa xác định</span>
+                <div class="btn-row">
+                    <button id="bon-pump"  class="cb c-on">BẬT</button>
+                    <button id="boff-pump" class="cb c-off">TẮT</button>
+                </div>
+            </div>
+
+            <div class="c-box" style="border-color:#9b59b6">
+                <div class="c-label">🌀 Quạt Tản Nhiệt</div>
+                <span id="ind-fan" class="st-badge st-unknown">⚪ Chưa xác định</span>
+                <div class="btn-row">
+                    <button id="bon-fan"  class="cb c-on">BẬT</button>
+                    <button id="boff-fan" class="cb c-off">TẮT</button>
+                </div>
+            </div>
+
+            <div class="c-box" style="border-color:#2c3e50">
+                <div class="c-label">⚙️ Chế Độ Vận Hành</div>
+                <span id="ind-auto" class="st-badge st-unknown">⚪ Chưa xác định</span>
+                <div class="btn-row">
+                    <button id="bon-auto"  class="cb c-auto">AUTO</button>
+                    <button id="boff-auto" class="cb c-manual">MANUAL</button>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- ======== CHART CARD ======== -->
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <h2>📊 Biểu Đồ Lịch Sử</h2>
+                <p>Dữ liệu từ Supabase · Live point từ MQTT · Tự đồng bộ mỗi 5 phút</p>
+            </div>
+            <button id="btn-rf" class="btn-rf">↻ Làm mới</button>
+        </div>
+        <div class="chart-wrap">
+            <canvas id="myChart"></canvas>
+            <!-- Overlay: loading / error / empty -->
+            <div id="chart-overlay" class="c-overlay">
+                <div class="spinner"></div>
+                <div class="overlay-text">Đang tải dữ liệu lịch sử...</div>
+            </div>
+        </div>
+        <p id="chart-meta" class="chart-meta"></p>
+    </div>
+
+</div>
+<div id="toast"></div>
+
+<script>
+// ================================================================
+//  DASHBOARD IOT – nhatle2.github.io/dashboard-iot/
+//  GitHub Pages: chạy thuần client-side, không có server
+//
+//  Bảo mật (dành cho môi trường sau này):
+//    - MQTT: broker.emqx.io là public — ai biết topic cũng đọc/ghi được.
+//      Thêm username/password trong mqtt.connect() khi cần bảo mật.
+//    - Supabase: key publishable là OK chạy client-side, chưa vậy
+//      kiểm tra Row Level Security trong Supabase Dashboard > Auth > Policies.
+// ================================================================
+
+// --- Khai báo trước với giá trị an toàn — KHÔNG dùng const ở tầm global
+//     để tránh Temporal Dead Zone khi onclick hoặc CDN lỗi ---
+let mqttClient    = null;
+let chart         = null;
+let _toast        = null;
+let _lastRx       = 0;      // timestamp nhận sensor cuối
+let _chartRefresh = null;   // setInterval ref
+
+// Constants
+const CONFIRM_MS      = 6000;
+const STALE_MS        = 90000;   // 90s không nhận -> hiển thị offline
+const CHART_SYNC_MS   = 300000;  // 5 phút
+const MAX_PTS         = 20;
+
+const T = {
+    sensor:  'DoAn_EE3183_NhatLe/sensors',
+    control: 'DoAn_EE3183_NhatLe/control',
+    status:  'DoAn_EE3183_NhatLe/status',
+};
+
+const SB = {
+    url:   'https://jlumfhzlpvbujfcwshtg.supabase.co',
+    key:   'sb_publishable_5a6Ugo0f9VlMBA6w8AFgvA_7BsYZ47W',
+    table: 'nong_nghiep_data',
+    // Các tên cột đầy đủ khai báo một chỗ — dễ sửa nếu sai
+    cTime: 'created_at',
+    cTemp: 'temperature',
+    cHum:  'humidity',
+    cSoil: 'soil_moisture',
+};
+
+const DEV = {
+    pump: { state: null, pending: false, timeout: false, timer: null },
+    fan:  { state: null, pending: false, timeout: false, timer: null },
+    auto: { state: null, pending: false, timeout: false, timer: null },
+};
+
+const BADGE = {
+    pump: { 1: ['st-on',    '🟢 ĐANG BẬT'],       0: ['st-off',    '🔴 ĐANG TẮT']        },
+    fan:  { 1: ['st-on',    '🟢 ĐANG BẬT'],       0: ['st-off',    '🔴 ĐANG TẮT']        },
+    auto: { 1: ['st-auto',  '🔵 Chế độ AUTO'], 0: ['st-manual', '⚪ Chế độ MANUAL'] },
+};
+
+// ================================================================
+//  TOAST
+// ================================================================
+function toast(msg, ms) {
+    var el = document.getElementById('toast');
+    el.textContent = msg;
+    el.className = 'show';
+    clearTimeout(_toast);
+    _toast = setTimeout(function(){ el.className = ''; }, ms || 3000);
+}
+
+// ================================================================
+//  DEVICE UI
+// ================================================================
+function renderDev(id) {
+    var d = DEV[id];
+    var ind = document.getElementById('ind-' + id);
+    var b0  = document.getElementById('bon-'  + id);
+    var b1  = document.getElementById('boff-' + id);
+    if (!ind || !b0 || !b1) return;
+
+    if (d.pending) {
+        ind.className = 'st-badge st-pending';
+        ind.textContent = '⏳ Đang chờ xác nhận…';
+    } else if (d.timeout) {
+        ind.className = 'st-badge st-timeout';
+        ind.textContent = '⚠️ Mạch không phản hồi';
+    } else if (d.state === null) {
+        ind.className = 'st-badge st-unknown';
+        ind.textContent = '⚪ Chưa xác định';
+    } else {
+        var c = BADGE[id][d.state];
+        ind.className = 'st-badge ' + c[0];
+        ind.textContent = c[1];
+    }
+
+    var ok = !d.pending && !d.timeout;
+    b0.classList.toggle('lit', ok && d.state === 1);
+    b1.classList.toggle('lit', ok && d.state === 0);
+    b0.disabled = d.pending;
+    b1.disabled = d.pending;
+}
+
+// Nhận phản hồi từ MCU
+function applyStatus(p) {
+    ['pump','fan','auto'].forEach(function(id) {
+        if (p[id] === undefined) return;
+        var d = DEV[id];
+        clearTimeout(d.timer);
+        d.pending = false;
+        d.timeout = false;
+        d.state   = p[id];
+        renderDev(id);
+    });
+}
+
+// Reset về offline (khi mất kết nối MQTT)
+function devOffline() {
+    ['pump','fan','auto'].forEach(function(id) {
+        clearTimeout(DEV[id].timer);
+        DEV[id].state   = null;
+        DEV[id].pending = false;
+        DEV[id].timeout = false;
+        var ind = document.getElementById('ind-' + id);
+        if (ind) { ind.className = 'st-badge st-offline'; ind.textContent = '🔌 Mất kết nối'; }
+        var b0 = document.getElementById('bon-'  + id); if (b0) b0.disabled = false;
+        var b1 = document.getElementById('boff-' + id); if (b1) b1.disabled = false;
+    });
+}
+
+// ================================================================
+//  SENSOR DISPLAY
+// ================================================================
+function updateSensor(t, h, s) {
+    if (t !== null) document.getElementById('rt-temp').textContent  = t.toFixed(1);
+    if (h !== null) document.getElementById('rt-hum').textContent   = h.toFixed(1);
+    if (s !== null) document.getElementById('rt-soil').textContent  = s.toFixed(1);
+    ['sbox-temp','sbox-hum','sbox-soil'].forEach(function(id){
+        var el = document.getElementById(id); if (el) el.classList.remove('stale');
+    });
+    document.getElementById('sensor-ts').textContent =
+        'Cập nhật: ' + new Date().toLocaleTimeString('vi-VN');
+    _lastRx = Date.now();
+}
+
+function sensorOffline(why) {
+    ['rt-temp','rt-hum','rt-soil'].forEach(function(id){
+        var el = document.getElementById(id); if (el) el.textContent = '--';
+    });
+    ['sbox-temp','sbox-hum','sbox-soil'].forEach(function(id){
+        var el = document.getElementById(id); if (el) el.classList.add('stale');
+    });
+    document.getElementById('sensor-ts').textContent = why || 'Mất tín hiệu';
+    _lastRx = 0;
+}
+
+// ================================================================
+//  CHART (Supabase history + live MQTT push)
+// ================================================================
+function setOverlay(state, extra) {
+    var el = document.getElementById('chart-overlay');
+    if (!el) return;
+    if (state === 'hide') { el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    if (state === 'load') {
+        el.innerHTML = '<div class="spinner"></div><div class="overlay-text">Đang tải dữ liệu...</div>';
+    } else if (state === 'empty') {
+        el.innerHTML = '<div class="overlay-text">Bảng Supabase trống — chưa có dữ liệu lịch sử</div>';
+    } else if (state === 'err') {
+        el.innerHTML = '<div class="overlay-text">❌ Không tải được dữ liệu' +
+                       (extra ? '<div class="err">' + extra + '</div>' : '') +
+                       '</div><button class="btn-retry" id="btn-retry">↻ Thử lại</button>';
+        var b = document.getElementById('btn-retry');
+        if (b) b.addEventListener('click', syncChart);
+    }
+}
+
+async function syncChart() {
+    var btnRf = document.getElementById('btn-rf');
+    if (btnRf) btnRf.disabled = true;
+    setOverlay('load');
+
+    try {
+        var url = SB.url + '/rest/v1/' + SB.table +
+                  '?select=' + SB.cTime + ',' + SB.cTemp + ',' + SB.cHum + ',' + SB.cSoil +
+                  '&order=' + SB.cTime + '.desc&limit=' + MAX_PTS;
+
+        var res = await fetch(url, {
+            headers: { 'apikey': SB.key, 'Authorization': 'Bearer ' + SB.key }
+        });
+
+        // Lỗi cụ thể — hiển ra rõ để biết fix ở đâu
+        if (res.status === 401 || res.status === 403) {
+            setOverlay('err', 'Lỗi xác thực Supabase (HTTP ' + res.status + ') — kiểm tra key & RLS Policy');
+            return;
+        }
+        if (res.status === 404) {
+            setOverlay('err', 'Bảng "' + SB.table + '" không tồn tại (HTTP 404) — kiểm tra tên bảng');
+            return;
+        }
+        if (!res.ok) {
+            setOverlay('err', 'Lỗi server Supabase (HTTP ' + res.status + ')');
+            return;
+        }
+
+        var rows = await res.json();
+        if (!rows || !rows.length) { setOverlay('empty'); return; }
+
+        rows.reverse();
+        var labels = rows.map(function(r){ return new Date(r[SB.cTime]).toLocaleTimeString('vi-VN'); });
+        var temps  = rows.map(function(r){ return r[SB.cTemp];  });
+        var hums   = rows.map(function(r){ return r[SB.cHum];   });
+        var soils  = rows.map(function(r){ return r[SB.cSoil];  });
+
+        if (chart) {
+            // Cập nhật data, không destroy → không memory leak
+            chart.data.labels = labels;
+            chart.data.datasets[0].data = temps;
+            chart.data.datasets[1].data = hums;
+            chart.data.datasets[2].data = soils;
+            chart.update('none');
+        } else {
+            chart = new Chart(document.getElementById('myChart').getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        { label:'Nhiệt độ (°C)', data:temps, borderColor:'#e74c3c', backgroundColor:'rgba(231,76,60,.06)',  tension:.4, fill:true, pointRadius:3 },
+                        { label:'Độ ẩm KK (%)', data:hums,  borderColor:'#3498db', backgroundColor:'rgba(52,152,219,.06)', tension:.4, fill:true, pointRadius:3 },
+                        { label:'Độ ẩm Đất (%)', data:soils, borderColor:'#2ecc71', backgroundColor:'rgba(46,204,113,.06)', tension:.4, fill:true, pointRadius:3 },
+                    ]
+                },
+                options: {
+                    responsive:true, maintainAspectRatio:false, animation:false,
+                    scales:{
+                        x:{ ticks:{ maxTicksLimit:8, font:{size:11} } },
+                        y:{ ticks:{ font:{size:11} } }
+                    },
+                    plugins:{ legend:{ labels:{ font:{size:12} } } }
+                }
+            });
+        }
+
+        setOverlay('hide');
+        var meta = document.getElementById('chart-meta');
+        if (meta) meta.textContent = 'Đồng bộ lúc ' + new Date().toLocaleTimeString('vi-VN') + ' — ' + rows.length + ' bản ghi';
+
+    } catch(e) {
+        console.error('Supabase fetch error:', e);
+        setOverlay('err', 'Không kết nối được Supabase — kiểm tra mạng');
+    } finally {
+        if (btnRf) btnRf.disabled = false;
+    }
+}
+
+function livePoint(t, h, s) {
+    // Guard cả 3: nếu bất kỳ giá trị nào null → bỏ qua, tránh điểm NaN trên chart
+    if (!chart || t === null || h === null || s === null) return;
+    chart.data.labels.push(new Date().toLocaleTimeString('vi-VN'));
+    chart.data.datasets[0].data.push(t);
+    chart.data.datasets[1].data.push(h);
+    chart.data.datasets[2].data.push(s);
+    if (chart.data.labels.length > MAX_PTS) {
+        chart.data.labels.shift();
+        chart.data.datasets.forEach(function(d){ d.data.shift(); });
+    }
+    chart.update('none');
+}
+
+// ================================================================
+//  SEND CONTROL COMMAND
+// ================================================================
+function sendControl(device, state) {
+    if (!mqttClient || !mqttClient.connected) {
+        toast('⚠️ Chưa kết nối MQTT — không thể gửi lệnh');
+        return;
+    }
+    mqttClient.publish(T.control, JSON.stringify({ device:device, state:state }), { qos:1 });
+
+    clearTimeout(DEV[device].timer);
+    DEV[device].pending = true;
+    DEV[device].timeout = false;
+    renderDev(device);
+
+    DEV[device].timer = setTimeout(function(){
+        if (!DEV[device].pending) return;
+        DEV[device].pending = false;
+        DEV[device].timeout = true;
+        renderDev(device);
+        toast('⚠️ Mạch không phản hồi sau ' + (CONFIRM_MS/1000) + 's', 4000);
+    }, CONFIRM_MS);
+
+    var N = { pump:'Bơm', fan:'Quạt', auto:'Chế độ' };
+    var S = { pump:['→ TẮT','→ BẬT'], fan:['→ TẮT','→ BẬT'], auto:['→ MANUAL','→ AUTO'] };
+    toast('📡 Đã phát: ' + N[device] + ' ' + S[device][state]);
+}
+
+// ================================================================
+//  INIT — DOMContentLoaded đảm bảo DOM + CDN đều sẵn
+// ================================================================
+document.addEventListener('DOMContentLoaded', function() {
+
+    // --- Kiểm tra CDN đã load chưa ---
+    if (typeof mqtt === 'undefined') {
+        toast('❌ MQTT.js chưa tải được — kiểm tra kết nối mạng', 10000);
+        return;  // Dừng khởi tạo, tránh crash
+    }
+    if (typeof Chart === 'undefined') {
+        setOverlay('err', 'Chart.js chưa tải được — kiểm tra mạng');
+        // Không return — MQTT vẫn dùng được
+    }
+
+    // --- Khởi tạo MQTT (gán vào let mqttClient đã khai báo) ---
+    mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
+        clientId:        'iot_' + Math.random().toString(36).slice(2,8),
+        clean:           true,
+        keepalive:       60,
+        reconnectPeriod: 4000,
+        connectTimeout:  10000,
+    });
+
+    var badge    = document.getElementById('mqtt-status');
+    var badgeMain = document.getElementById('mqtt-main');  // span riêng — không dùng childNodes[0] dễ vỡ
+    var badgeSub = document.getElementById('mqtt-sub');
+
+    mqttClient.on('connect', function() {
+        badge.className  = 'mqtt-badge ok';
+        badgeMain.textContent = '🟢 Đã kết nối';
+        if (badgeSub) badgeSub.textContent = 'broker.emqx.io · ' + new Date().toLocaleTimeString('vi-VN');
+        // Subscribe cả 2 topic
+        mqttClient.subscribe([T.sensor, T.status], { qos:1 });
+        toast('✅ Kết nối MQTT thành công');
+    });
+
+    mqttClient.on('reconnect', function() {
+        badge.className  = 'mqtt-badge pending';
+        badgeMain.textContent = '🟡 Đang kết nối lại…';
+        if (badgeSub) badgeSub.textContent = '';
+        // Hiển offline ngay khi bắt đầu reconnect
+        devOffline();
+    });
+
+    mqttClient.on('offline', function() {
+        badge.className  = 'mqtt-badge';
+        badgeMain.textContent = '🔴 Mất kết nối';
+        if (badgeSub) badgeSub.textContent = '';
+        devOffline();
+        sensorOffline('Mất kết nối MQTT');
+    });
+
+    mqttClient.on('error', function(e) {
+        console.error('MQTT error:', e);
+        toast('❌ Lỗi MQTT: ' + (e.message || 'unknown error'), 5000);
+    });
+
+    mqttClient.on('message', function(topic, raw) {
+        var data;
+        try { data = JSON.parse(raw.toString()); }
+        catch(e) { console.warn('JSON parse failed on', topic); return; }
+
+        if (topic === T.sensor) {
+            var t = typeof data.t === 'number' ? data.t : null;
+            var h = typeof data.h === 'number' ? data.h : null;
+            var s = typeof data.s === 'number' ? data.s : null;
+            updateSensor(t, h, s);
+            livePoint(t, h, s);
+            applyStatus(data); // Hỗ trợ firmware gửi device state kèm sensor
+        }
+
+        if (topic === T.status) {
+            applyStatus(data); // MCU xác nhận sau lệnh điều khiển
+        }
+    });
+
+    // --- Gắn sự kiện nút (không dùng onclick trong HTML) ---
+    [
+        ['bon-pump',  'pump', 1],
+        ['boff-pump', 'pump', 0],
+        ['bon-fan',   'fan',  1],
+        ['boff-fan',  'fan',  0],
+        ['bon-auto',  'auto', 1],
+        ['boff-auto', 'auto', 0],
+    ].forEach(function(row) {
+        var el = document.getElementById(row[0]);
+        if (!el) return;
+        el.addEventListener('click', (function(dev, st){
+            return function(){ sendControl(dev, st); };
+        })(row[1], row[2]));
+    });
+
+    // --- Refresh chart button ---
+    var btnRf = document.getElementById('btn-rf');
+    if (btnRf) btnRf.addEventListener('click', syncChart);
+
+    // --- Tải chart lần đầu ---
+    if (typeof Chart !== 'undefined') syncChart();
+
+    // --- Auto sync Supabase mỗi 5 phút ---
+    _chartRefresh = setInterval(function(){
+        if (typeof Chart !== 'undefined') syncChart();
+    }, CHART_SYNC_MS);
+
+    // --- Watchdog: kiểm tra sensor stale mỗi 15s ---
+    setInterval(function(){
+        if (_lastRx > 0 && Date.now() - _lastRx > STALE_MS) {
+            sensorOffline('Không nhận được dữ liệu > 90s');
+        }
+    }, 15000);
+
+});
+</script>
+</body>
+</html>
